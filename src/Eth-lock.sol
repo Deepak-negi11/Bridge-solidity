@@ -27,26 +27,46 @@ contract Locketh is Ownable, ReentrancyGuard {
     }
 
     /// @notice Lock canonical tokens in the vault as part of bridging to the other chain
+    /// @dev This is step 1 of ETH→SUI bridge. User calls this to lock tokens.
+    ///      Later, operator will credit them on SUI side after verification.
     /// @param _amount Amount of tokens to deposit (must be approved first)
     function deposit(uint256 _amount) external nonReentrant {
+        // Input validation: prevent zero-value operations
         require(_amount > 0, "Amount must be greater than 0");
+        
+        // Check user has approved this contract to spend their tokens
+        // This is standard ERC20 pattern: approve() then transferFrom()
         require(tokenAddress.allowance(msg.sender, address(this)) >= _amount, "Insufficient allowance");
         
+        // Transfer tokens from user to this vault contract
+        // We check the return value to handle non-standard ERC20s
         bool success = tokenAddress.transferFrom(msg.sender, address(this), _amount);
         require(success, "Transfer failed");
         
+        // Credit user's internal balance for future withdrawals
+        // This acts as a "receipt" that user can later redeem
         balances[msg.sender] += _amount;
+        
+        // Emit event for off-chain monitoring and bridge operator
         emit Deposited(msg.sender, _amount);
     }
     
     /// @notice Withdraw previously locked canonical tokens (typically after a burn on the other chain)
+    /// @dev This is step 3 of SUI→ETH bridge. User calls this after operator credits them.
+    ///      Operator calls burnOnOtherSide() first to give user withdrawal credit.
     /// @param _amount Amount of tokens to withdraw
     function withdraw(uint256 _amount) external nonReentrant {
+        // Input validation: prevent zero-value operations
         require(_amount > 0, "Amount must be greater than 0");
+        
+        // Check user has sufficient internal credit from deposits or operator credits
         require(balances[msg.sender] >= _amount, "Insufficient balance");
         
+        // Deduct from user's internal balance BEFORE external call (CEI pattern)
         balances[msg.sender] -= _amount;
         
+        // Transfer tokens from vault back to user
+        // Vault must have sufficient tokens from previous deposits
         bool success = tokenAddress.transfer(msg.sender, _amount);
         require(success, "Transfer failed");
         

@@ -1,54 +1,79 @@
 // SPDX-License-Identifier: MIT
 // Tests origin-chain vault behavior: deposits, withdrawals, credits from opposite chain,
 // access control, and reentrancy guards.
+//
+// ORIGIN CHAIN TESTING STRATEGY:
+// - Test deposit flow: user approves → deposits ETH → vault holds tokens → user gets internal credit
+// - Test withdrawal flow: user has credit → withdraws → vault transfers tokens back → credit decreases
+// - Test operator credit: only owner can credit users after verifying burns on other chain
+// - Test edge cases: zero amounts, insufficient allowance/balance, unauthorized access
+// - Test security: reentrancy protection, emergency functions, event emissions
 pragma solidity ^0.8.30;
 
-import "lib/forge-std/src/Test.sol";
-import "src/Eth.sol";
-import "src/Eth-lock.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+// Testing framework and utilities
+import "lib/forge-std/src/Test.sol";  // Foundry testing with vm cheatcodes
+import "src/Eth.sol";                 // Canonical token that gets locked
+import "src/Eth-lock.sol";            // Origin vault managing lock/unlock
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol"; // Token interface
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";    // Access control errors
+import {console} from "lib/forge-std/src/Console.sol";
 
 contract EthBridgeTest is Test {
-    Eth public eth;
-    Locketh public lockContract;
+    // Core contracts under test
+    Eth public eth;              // The canonical token users want to bridge
+    Locketh public lockContract; // The vault that locks tokens on origin chain
     
-    address public owner;
-    address public user1;
-    address public user2;
-    address public attacker;
+    // Test participants
+    address public owner;    // Test contract = vault owner = bridge operator
+    address public user1;    // Primary user doing bridge operations
+    address public user2;    // Secondary user for multi-user tests
+    address public attacker; // Malicious actor testing access controls
     
-    uint256 constant INITIAL_SUPPLY = 1000000 * 10**18;
-    uint256 constant TEST_AMOUNT = 1000 * 10**18;
+    // Test amounts (using 18 decimal standard)
+    uint256 constant INITIAL_SUPPLY = 1000000 * 10**18; // 1M tokens for each user
+    uint256 constant TEST_AMOUNT = 1000 * 10**18;       // 1K tokens per operation
     
-    event Deposited(address indexed user, uint256 amount);
-    event Withdrawn(address indexed user, uint256 amount);
-    event BurnedOnOtherSide(address indexed user, uint256 amount);
+    // Events we expect from the vault contract (copied for vm.expectEmit)
+    event Deposited(address indexed user, uint256 amount);       // User locked tokens
+    event Withdrawn(address indexed user, uint256 amount);       // User unlocked tokens
+    event BurnedOnOtherSide(address indexed user, uint256 amount); // Operator credited user
     
     function setUp() public {
-    owner = address(this);
-    user1 = vm.addr(uint256(keccak256(abi.encodePacked("user1"))));
-    user2 = vm.addr(uint256(keccak256(abi.encodePacked("user2"))));
-    attacker = vm.addr(uint256(keccak256(abi.encodePacked("attacker"))));
+        // Test contract acts as both deployer and bridge operator
+        owner = address(this);
         
-        // Deploy contracts
-        eth = new Eth();
-        lockContract = new Locketh(address(eth));
+        // Generate deterministic test addresses from known seed strings
+        user1 = vm.addr(uint256(keccak256(abi.encodePacked("user1"))));
+        user2 = vm.addr(uint256(keccak256(abi.encodePacked("user2"))));
+        attacker = vm.addr(uint256(keccak256(abi.encodePacked("attacker"))));
         
-        // Mint initial tokens to users
-        eth.mint(user1, INITIAL_SUPPLY);
-        eth.mint(user2, INITIAL_SUPPLY);
-        eth.mint(attacker, INITIAL_SUPPLY);
+        // Deploy the origin chain bridge system
+        eth = new Eth();                        // Deploy canonical token
+        lockContract = new Locketh(address(eth)); // Deploy vault pointing to token
+        
+        // Seed all test participants with canonical tokens
+        // (In reality, users would already own these tokens)
+        eth.mint(user1, INITIAL_SUPPLY);    // Give user1 1M ETH tokens
+        eth.mint(user2, INITIAL_SUPPLY);    // Give user2 1M ETH tokens  
+        eth.mint(attacker, INITIAL_SUPPLY); // Give attacker 1M ETH tokens (for testing)
     }
     
     function testDeposit() public {
-        vm.startPrank(user1);
+        // === TEST: SUCCESSFUL DEPOSIT FLOW ===
+        // This tests the happy path where user locks tokens in the vault
         
-        // Approve tokens
+        vm.startPrank(user1);  // All calls from user1's perspective
+        
+        // STEP 1: User must approve vault to spend their tokens
+        // This is standard ERC20 pattern - vault needs permission to transfer
         eth.approve(address(lockContract), TEST_AMOUNT);
         
-        uint256 balanceBefore = eth.balanceOf(user1);
-        uint256 contractBalanceBefore = eth.balanceOf(address(lockContract));
+        // Record balances before the deposit for comparison
+        uint256 balanceBefore = eth.balanceOf(user1);            // User's ETH balance
+        uint256 contractBalanceBefore = eth.balanceOf(address(lockContract)); // Vault's ETH balance
+        console.log(user1);
+        console.log(lockContract);
+        console.log(contractBalanceBefore);
         
         // Expect event
         vm.expectEmit(true, false, false, true);
